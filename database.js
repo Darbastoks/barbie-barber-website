@@ -35,11 +35,13 @@ const Booking = mongoose.model('Booking', bookingSchema);
 // Initialize Database Connection
 async function initDatabase() {
     try {
-        if (!process.env.MONGO_URI) {
-            throw new Error('MONGO_URI string is not defined in .env file');
+        if (!process.env.MONGO_URI && !process.env.MONGODB_URI) {
+            console.warn('⚠️ MONGO_URI string is not defined in .env file. Running without database.');
+            return;
         }
 
-        await mongoose.connect(process.env.MONGO_URI);
+        const uri = process.env.MONGO_URI || process.env.MONGODB_URI;
+        await mongoose.connect(uri);
         console.log('✅ Connected to MongoDB successfully');
 
         // Seed default Admin if not exists

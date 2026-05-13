@@ -101,20 +101,19 @@ function updateStats() {
     document.getElementById('statCompleted').textContent = allBookings.filter(b => b.status === 'completed').length;
 }
 
-// --- Render Bookings Table ---
+// --- Render Bookings (table + mobile cards) ---
 function renderBookings() {
     const tbody = document.getElementById('bookingsBody');
+    const cardsContainer = document.getElementById('bookingCards');
     const emptyState = document.getElementById('emptyState');
     const searchQuery = document.getElementById('searchInput').value.toLowerCase();
 
     let filtered = allBookings;
 
-    // Filter by status
     if (currentFilter !== 'all') {
         filtered = filtered.filter(b => b.status === currentFilter);
     }
 
-    // Filter by search
     if (searchQuery) {
         filtered = filtered.filter(b =>
             b.name.toLowerCase().includes(searchQuery) ||
@@ -125,12 +124,14 @@ function renderBookings() {
 
     if (filtered.length === 0) {
         tbody.innerHTML = '';
+        if (cardsContainer) cardsContainer.innerHTML = '';
         emptyState.style.display = 'block';
         return;
     }
 
     emptyState.style.display = 'none';
 
+    // Desktop table rows
     tbody.innerHTML = filtered.map(b => `
         <tr>
             <td>#${b.id}</td>
@@ -143,6 +144,39 @@ function renderBookings() {
             <td>${getActionButtons(b)}</td>
         </tr>
     `).join('');
+
+    // Mobile cards
+    if (cardsContainer) {
+        cardsContainer.innerHTML = filtered.map(b => `
+            <div class="booking-card">
+                <div class="booking-card-top">
+                    <span class="booking-card-id">#${b.id}</span>
+                    <span class="booking-card-status status-${b.status}">${getStatusText(b.status)}</span>
+                </div>
+                <div class="booking-card-info">
+                    <div class="info-row">
+                        <span class="info-label">Vardas</span>
+                        <span class="info-value name">${escapeHtml(b.name)}</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Telefonas</span>
+                        <span class="info-value">${escapeHtml(b.phone)}</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Paslauga</span>
+                        <span class="info-value">${escapeHtml(b.service)}</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Data / Laikas</span>
+                        <span class="info-value">${formatDate(b.date)} ${b.time}</span>
+                    </div>
+                </div>
+                <div class="booking-card-actions">
+                    ${getActionButtons(b)}
+                </div>
+            </div>
+        `).join('');
+    }
 }
 
 function getStatusText(status) {

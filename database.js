@@ -1,83 +1,84 @@
-const mongoose = require('mongoose');
-const bcrypt = require('bcryptjs');
+const path = require('path');
+const Database = require('better-sqlite3');
 
-// Define Schemas
-const adminSchema = new mongoose.Schema({
-    username: { type: String, required: true, unique: true },
-    password: { type: String, required: true }
-});
+const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'data', 'barbershop.db');
 
-const serviceSchema = new mongoose.Schema({
-    name: { type: String, required: true },
-    price: { type: Number, required: true },
-    description: { type: String },
-    duration: { type: Number, default: 30 },
-    sort_order: { type: Number, default: 0 }
-});
+let db;
 
-const bookingSchema = new mongoose.Schema({
-    name: { type: String, required: true },
-    phone: { type: String, required: true },
-    email: { type: String },
-    service: { type: String, required: true },
-    date: { type: String, required: true }, // Format: YYYY-MM-DD
-    time: { type: String, required: true }, // Format: HH:MM
-    message: { type: String },
-    status: { type: String, enum: ['pending', 'confirmed', 'cancelled'], default: 'pending' },
-    created_at: { type: Date, default: Date.now }
-});
-
-// Compile Models
-const Admin = mongoose.model('Admin', adminSchema);
-const Service = mongoose.model('Service', serviceSchema);
-const Booking = mongoose.model('Booking', bookingSchema);
-
-// Initialize Database Connection
-async function initDatabase() {
-    try {
-        if (!process.env.MONGO_URI && !process.env.MONGODB_URI) {
-            console.warn('⚠️ MONGO_URI string is not defined in .env file. Running without database.');
-            return;
-        }
-
-        const uri = process.env.MONGO_URI || process.env.MONGODB_URI;
-        await mongoose.connect(uri);
-        console.log('✅ Connected to MongoDB successfully');
-
-        // Seed default Admin if not exists
-        const adminCount = await Admin.countDocuments();
-        if (adminCount === 0) {
-            const hashedPassword = bcrypt.hashSync('barber2024', 10);
-            await Admin.create({ username: 'admin', password: hashedPassword });
-            console.log('✅ Default admin account created (admin / barber2024)');
-        }
-
-        // Seed default Services if not exists
-        const servicesCount = await Service.countDocuments();
-        if (servicesCount === 0) {
-            const defaultServices = [
-                { name: 'Plaukų kirpimas', price: 25, description: 'Profesionalus vyrų plaukų kirpimas', duration: 30, sort_order: 1 },
-                { name: 'Barzdos modeliavimas', price: 25, description: 'Barzdos formavimas ir modeliavimas', duration: 30, sort_order: 2 },
-                { name: 'Barzda su karštų rankšluosčių', price: 25, description: 'Barzdos tvarkymas su karštais rankšluosčiais', duration: 35, sort_order: 3 },
-                { name: 'Kirpimas + barzdos modeliavimas', price: 35, description: 'Plaukų kirpimas kartu su barzdos modeliavimu', duration: 50, sort_order: 4 },
-                { name: 'Grožio kaukė + antakių korekcija', price: 15, description: 'Veido kaukė ir antakių korekcija', duration: 20, sort_order: 5 },
-                { name: 'Dažymo konsultacija', price: 5, description: 'Konsultacija dėl plaukų dažymo', duration: 15, sort_order: 6 },
-                { name: 'Kirpimas + barzda + grožio kaukė', price: 40, description: 'Pilnas kompleksas: kirpimas, barzda ir kaukė', duration: 60, sort_order: 7 },
-                { name: 'Kompleksas (viskas)', price: 50, description: 'Kirpimas + barzda + karšti rankšluosčiai + kaukė', duration: 75, sort_order: 8 }
-            ];
-            await Service.insertMany(defaultServices);
-            console.log('✅ Default services inserted');
-        }
-
-    } catch (error) {
-        console.error('❌ MongoDB Connection Error:', error.message);
-        process.exit(1);
+function getDb() {
+    if (!db) {
+        db = new Database(DB_PATH);
+        db.pragma('journal_mode = WAL');
+        db.pragma('foreign_keys = ON');
     }
+    return db;
 }
 
-module.exports = {
-    initDatabase,
-    Admin,
-    Service,
-    Booking
-};
+function initDatabase() {
+    const db = getDb();
+
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS admins (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL UNIQUE,
+            password TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS services (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            price INTEGER NOT NULL,
+            description TEXT DEFAULT '',
+            duration INTEGER DEFAULT 30,
+            sort_order INTEGER DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS bookings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            phone TEXT NOT NULL,
+            email TEXT DEFAULT '',
+            service TEXT NOT NULL,
+            date TEXT NOT NULL,
+            time TEXT NOT NULL,
+            message TEXT DEFAULT '',
+            status TEXT DEFAULT 'pending',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+    `);
+
+    // Seed admin if not exists
+    const bcrypt = require('bcryptjs');
+    const adminCount = db.prepare('SELECT COUNT(*) as count FROM admins').get();
+    if (adminCount.count === 0) {
+        const hash = bcrypt.hashSync('barber2024', 10);
+        db.prepare('INSERT INTO admins (username, password) VALUES (?, ?)').run('admin', hash);
+        console.log('✅ Default admin created (admin / barber2024)');
+    }
+
+    // Seed services if not exists
+    const svcCount = db.prepare('SELECT COUNT(*) as count FROM services').get();
+    if (svcCount.count === 0) {
+        const insert = db.prepare('INSERT INTO services (name, price, description, duration, sort_order) VALUES (?, ?, ?, ?, ?)');
+        const services = [
+            ['Plaukų kirpimas', 25, 'Profesionalus vyrų plaukų kirpimas', 30, 1],
+            ['Barzdos modeliavimas', 25, 'Barzdos formavimas ir modeliavimas', 30, 2],
+            ['Barzda su karštų rankšluosčių', 25, 'Barzdos tvarkymas su karštais rankšluosčiais', 35, 3],
+            ['Kirpimas + barzdos modeliavimas', 35, 'Plaukų kirpimas kartu su barzdos modeliavimu', 50, 4],
+            ['Grožio kaukė + antakių korekcija', 15, 'Veido kaukė ir antakių korekcija', 20, 5],
+            ['Dažymo konsultacija', 5, 'Konsultacija dėl plaukų dažymo', 15, 6],
+            ['Kirpimas + barzda + grožio kaukė', 40, 'Pilnas kompleksas: kirpimas, barzda ir kaukė', 60, 7],
+            ['Kompleksas (viskas)', 50, 'Kirpimas + barzda + karšti rankšluosčiai + kaukė', 75, 8]
+        ];
+        const insertMany = db.transaction(() => {
+            for (const s of services) insert.run(...s);
+        });
+        insertMany();
+        console.log('✅ Default services inserted');
+    }
+
+    console.log('✅ SQLite database ready');
+    return db;
+}
+
+module.exports = { initDatabase, getDb };

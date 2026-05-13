@@ -239,6 +239,22 @@ function initChangePassword() {
     const form = document.getElementById('changePasswordForm');
     if (!form) return;
 
+    // Open modal
+    const btn = document.getElementById('changePasswordBtn');
+    if (btn) {
+        btn.addEventListener('click', () => {
+            document.getElementById('passwordModal').style.display = 'flex';
+        });
+    }
+
+    // Close modal on outside click
+    const modal = document.getElementById('passwordModal');
+    if (modal) {
+        modal.addEventListener('click', (e) => {
+            if (e.target === modal) modal.style.display = 'none';
+        });
+    }
+
     form.addEventListener('submit', async (e) => {
         e.preventDefault();
 

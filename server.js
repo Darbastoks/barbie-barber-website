@@ -3,7 +3,7 @@ const express = require('express');
 const session = require('express-session');
 const bcrypt = require('bcryptjs');
 const path = require('path');
-const { initDatabase, Admin, Service, Booking } = require('./database');
+const { initDatabase, getDb } = require('./database');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -16,15 +16,16 @@ app.use(session({
     secret: process.env.SESSION_SECRET || 'barbie-barber-secret-key-2024',
     resave: false,
     saveUninitialized: false,
-    cookie: { maxAge: 24 * 60 * 60 * 1000 } // 24 hours
+    cookie: { maxAge: 24 * 60 * 60 * 1000 }
 }));
 
 // ==================== API ROUTES ====================
 
 // --- Services ---
-app.get('/api/services', async (req, res) => {
+app.get('/api/services', (req, res) => {
     try {
-        const services = await Service.find().sort({ sort_order: 1 });
+        const db = getDb();
+        const services = db.prepare('SELECT * FROM services ORDER BY sort_order').all();
         res.json(services);
     } catch (err) {
         console.error(err);
@@ -33,35 +34,38 @@ app.get('/api/services', async (req, res) => {
 });
 
 // --- Bookings ---
-app.post('/api/bookings', async (req, res) => {
+app.post('/api/bookings', (req, res) => {
     try {
-        const { name, phone, email, service, date, time, message } = req.body;
+        const { name, phone, email, service, date, time, message, website_url_fake } = req.body;
 
-        // Validation
+        // Honeypot check
+        if (website_url_fake) {
+            return res.status(200).json({ success: true, message: 'Registracija sėkminga! Laukiame jūsų.' });
+        }
+
         if (!name || !phone || !service || !date || !time) {
             return res.status(400).json({ error: 'Prašome užpildyti visus privalomus laukus' });
         }
 
-        // Check if time slot is already taken
-        const existing = await Booking.countDocuments({
-            date: date,
-            time: time,
-            status: { $ne: 'cancelled' }
-        });
+        const db = getDb();
 
-        if (existing > 0) {
+        // Check double-booking
+        const existing = db.prepare(
+            "SELECT COUNT(*) as count FROM bookings WHERE date = ? AND time = ? AND status != 'cancelled'"
+        ).get(date, time);
+
+        if (existing.count > 0) {
             return res.status(409).json({ error: 'Šis laikas jau užimtas. Pasirinkite kitą laiką.' });
         }
 
-        const newBooking = new Booking({
-            name, phone, email, service, date, time, message
-        });
-        await newBooking.save();
+        const result = db.prepare(
+            'INSERT INTO bookings (name, phone, email, service, date, time, message) VALUES (?, ?, ?, ?, ?, ?, ?)'
+        ).run(name, phone, email || '', service, date, time, message || '');
 
         res.status(201).json({
             success: true,
             message: 'Registracija sėkminga! Laukiame jūsų.',
-            bookingId: newBooking._id
+            bookingId: result.lastInsertRowid
         });
     } catch (err) {
         console.error('Booking error:', err);
@@ -69,14 +73,14 @@ app.post('/api/bookings', async (req, res) => {
     }
 });
 
-// Get booked times for a specific date (public - for the booking form)
-app.get('/api/bookings/times/:date', async (req, res) => {
+// Get booked times for a date
+app.get('/api/bookings/times/:date', (req, res) => {
     try {
-        const bookedTimes = await Booking.find(
-            { date: req.params.date, status: { $ne: 'cancelled' } },
-            { time: 1, _id: 0 }
-        );
-        res.json(bookedTimes.map(b => b.time));
+        const db = getDb();
+        const times = db.prepare(
+            "SELECT time FROM bookings WHERE date = ? AND status != 'cancelled'"
+        ).all(req.params.date);
+        res.json(times.map(t => t.time));
     } catch (err) {
         res.status(500).json({ error: 'Klaida gaunant laikus' });
     }
@@ -84,7 +88,6 @@ app.get('/api/bookings/times/:date', async (req, res) => {
 
 // ==================== ADMIN ROUTES ====================
 
-// Admin auth middleware
 function requireAdmin(req, res, next) {
     if (req.session && req.session.isAdmin) {
         return next();
@@ -92,19 +95,18 @@ function requireAdmin(req, res, next) {
     res.status(401).json({ error: 'Reikia prisijungti' });
 }
 
-// Admin login
-app.post('/api/admin/login', async (req, res) => {
+app.post('/api/admin/login', (req, res) => {
     try {
         const { username, password } = req.body;
-
-        const admin = await Admin.findOne({ username });
+        const db = getDb();
+        const admin = db.prepare('SELECT * FROM admins WHERE username = ?').get(username);
 
         if (!admin || !bcrypt.compareSync(password, admin.password)) {
             return res.status(401).json({ error: 'Neteisingas prisijungimo vardas arba slaptažodis' });
         }
 
         req.session.isAdmin = true;
-        req.session.adminId = admin._id;
+        req.session.adminId = admin.id;
         res.json({ success: true, message: 'Prisijungta sėkmingai' });
     } catch (err) {
         console.error(err);
@@ -112,34 +114,26 @@ app.post('/api/admin/login', async (req, res) => {
     }
 });
 
-// Admin logout
 app.post('/api/admin/logout', (req, res) => {
     req.session.destroy();
     res.json({ success: true });
 });
 
-// Check admin session
 app.get('/api/admin/check', requireAdmin, (req, res) => {
     res.json({ isAdmin: true });
 });
 
-// Get all bookings (admin only)
-app.get('/api/admin/bookings', requireAdmin, async (req, res) => {
+app.get('/api/admin/bookings', requireAdmin, (req, res) => {
     try {
-        const bookings = await Booking.find().sort({ date: -1, time: 1 });
-        // Mongoose maps _id to id virtually, but we can map it explicitly for the frontend
-        const formattedBookings = bookings.map(b => ({
-            ...b.toObject(),
-            id: b._id
-        }));
-        res.json(formattedBookings);
+        const db = getDb();
+        const bookings = db.prepare('SELECT * FROM bookings ORDER BY date DESC, time ASC').all();
+        res.json(bookings);
     } catch (err) {
         res.status(500).json({ error: 'Nepavyko gauti registracijų' });
     }
 });
 
-// Update booking status (admin only)
-app.patch('/api/admin/bookings/:id', requireAdmin, async (req, res) => {
+app.patch('/api/admin/bookings/:id', requireAdmin, (req, res) => {
     try {
         const { status } = req.body;
         const validStatuses = ['pending', 'confirmed', 'cancelled', 'completed'];
@@ -148,36 +142,36 @@ app.patch('/api/admin/bookings/:id', requireAdmin, async (req, res) => {
             return res.status(400).json({ error: 'Netinkamas statusas' });
         }
 
-        await Booking.findByIdAndUpdate(req.params.id, { status });
+        const db = getDb();
+        db.prepare('UPDATE bookings SET status = ? WHERE id = ?').run(status, req.params.id);
         res.json({ success: true });
     } catch (err) {
         res.status(500).json({ error: 'Nepavyko atnaujinti registracijos' });
     }
 });
 
-// Delete booking (admin only)
-app.delete('/api/admin/bookings/:id', requireAdmin, async (req, res) => {
+app.delete('/api/admin/bookings/:id', requireAdmin, (req, res) => {
     try {
-        await Booking.findByIdAndDelete(req.params.id);
+        const db = getDb();
+        db.prepare('DELETE FROM bookings WHERE id = ?').run(req.params.id);
         res.json({ success: true });
     } catch (err) {
         res.status(500).json({ error: 'Nepavyko ištrinti registracijos' });
     }
 });
 
-// Change admin password
-app.post('/api/admin/change-password', requireAdmin, async (req, res) => {
+app.post('/api/admin/change-password', requireAdmin, (req, res) => {
     try {
         const { currentPassword, newPassword } = req.body;
-
-        const admin = await Admin.findById(req.session.adminId);
+        const db = getDb();
+        const admin = db.prepare('SELECT * FROM admins WHERE id = ?').get(req.session.adminId);
 
         if (!bcrypt.compareSync(currentPassword, admin.password)) {
             return res.status(401).json({ error: 'Neteisingas dabartinis slaptažodis' });
         }
 
-        const hashedPassword = bcrypt.hashSync(newPassword, 10);
-        await Admin.findByIdAndUpdate(admin._id, { password: hashedPassword });
+        const hash = bcrypt.hashSync(newPassword, 10);
+        db.prepare('UPDATE admins SET password = ? WHERE id = ?').run(hash, admin.id);
 
         res.json({ success: true, message: 'Slaptažodis pakeistas' });
     } catch (err) {
@@ -190,17 +184,17 @@ app.get('/admin', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'admin.html'));
 });
 
-// Start server
+// ==================== START ====================
 async function start() {
     try {
-        await initDatabase();
+        initDatabase();
         app.listen(PORT, () => {
             console.log(`
-    ╔══════════════════════════════════════════╗
-    ║   💈 G SPOT BARBERSHOP - Serveris       ║
-    ║   🌐 http://localhost:${PORT}              ║
-    ║   👨‍💼 Admin: http://localhost:${PORT}/admin  ║
-    ╚══════════════════════════════════════════╝
+╔══════════════════════════════════════════╗
+║   💈 G SPOT BARBERSHOP - Serveris       ║
+║   🌐 http://localhost:${PORT}              ║
+║   👨‍💼 Admin: http://localhost:${PORT}/admin  ║
+╚══════════════════════════════════════════╝
             `);
         });
     } catch (err) {
